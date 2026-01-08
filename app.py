@@ -4,92 +4,91 @@ import pandas as pd
 from pypdf import PdfReader, PdfWriter
 import tempfile
 import os
+import re
 
-# 1. Page Configuration
 st.set_page_config(page_title="GSTR-1 Reco Tool", layout="wide")
-st.title("🏨 Hotel GSTR-1 Reconciliation Tool")
+st.title("🏨 Final GSTR-1 Reconciliation Tool")
 
-# 2. API Key Security Check
+# API Setup
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.error("Missing API Key! Please add 'GEMINI_API_KEY' in Streamlit Advanced Settings.")
+    st.error("API Key missing! Add GEMINI_API_KEY to Streamlit Secrets.")
     st.stop()
 
-# 3. Sidebar Uploaders
 st.sidebar.header("Step 1: Upload Files")
-pdf_file = st.sidebar.file_uploader("Upload ReportViewer PDF (Max 800MB)", type=["pdf"])
-excel_file = st.sidebar.file_uploader("Upload GSTR-1 Excel (.xlsx)", type=["xlsx"])
+pdf_file = st.sidebar.file_uploader("ReportViewer PDF", type=["pdf"])
+excel_file = st.sidebar.file_uploader("GSTR-1 Excel (.xlsx)", type=["xlsx"])
 
-# 4. Processing Logic
 if pdf_file and excel_file:
-    if st.button("🚀 Run Quota-Safe Audit"):
-        with st.spinner("Analyzing data..."):
+    if st.button("🚀 Run Accuracy-First Audit"):
+        with st.spinner("Processing documents..."):
             try:
-                # A. EXTRACT LAST PAGE (Bypasses the 250k token limit)
+                # 1. SLICE PDF (Last 2 pages)
                 reader = PdfReader(pdf_file)
                 total_pages = len(reader.pages)
                 writer = PdfWriter()
-                writer.add_page(reader.pages[total_pages - 1]) # Always target the summary page
+                start_page = max(0, total_pages - 2)
+                for i in range(start_page, total_pages):
+                    writer.add_page(reader.pages[i])
                 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                     writer.write(tmp_pdf)
                     tmp_pdf_path = tmp_pdf.name
+                gemini_pdf = genai.upload_file(path=tmp_pdf_path, display_name="SummaryPages")
 
-                # Upload slice to Google
-                gemini_pdf = genai.upload_file(path=tmp_pdf_path, display_name="SummaryPage")
-
-                # B. SUMMARIZE EXCEL LOCALLY (Prevents "429 Quota Exceeded")
-                # We do the heavy math in Python so we don't send 10,000 rows to the AI
-                df = pd.read_excel(excel_file)
+                # 2. ROBUST EXCEL PROCESSING (Reads ALL sheets)
+                all_sheets = pd.read_excel(excel_file, sheet_name=None)
                 
-                def safe_sum(keywords):
-                    # Finds columns like 'Taxable', 'CGST', etc., regardless of exact name
-                    for col in df.columns:
-                        if any(k.lower() in str(col).lower() for k in keywords):
-                            return round(pd.to_numeric(df[col], errors='coerce').sum(), 2)
-                    return 0.0
+                def get_global_sum(keywords):
+                    total = 0.0
+                    for sheet_name, df in all_sheets.items():
+                        for col in df.columns:
+                            if any(k.lower() in str(col).lower() for k in keywords):
+                                # Clean data: convert to numeric, ignore errors, fill NaN with 0
+                                clean_col = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.replace('₹', ''), errors='coerce').fillna(0)
+                                total += clean_col.sum()
+                    return round(total, 2)
 
-                excel_data_summary = {
-                    "Taxable Value": safe_sum(["Taxable", "Assessed"]),
-                    "CGST": safe_sum(["CGST", "Central"]),
-                    "SGST": safe_sum(["SGST", "State"]),
-                    "IGST": safe_sum(["IGST", "Integrated"]),
-                    "Cess": safe_sum(["Cess"]),
-                    "Total Invoice Value": safe_sum(["Invoice Value", "Total Amount"])
-                }
+                # Matching your requested components
+                ex_tax = get_global_sum(["Taxable", "Assessed"])
+                ex_cgst = get_global_sum(["CGST", "Central"])
+                ex_sgst = get_global_sum(["SGST", "State"])
+                ex_igst = get_global_sum(["IGST", "Integrated"])
+                ex_cess = get_global_sum(["Cess"])
+                ex_total = get_global_sum(["Invoice Value", "Total Amount"])
 
-                # C. AI RECONCILIATION (Using Flash for speed)
+                # 3. AI ANALYSIS WITH STRICT FORMATTING
                 model = genai.GenerativeModel("gemini-2.5-flash")
-                
                 prompt = f"""
-                You are a GST Auditor. Perform a reconciliation.
+                You are a Senior GST Auditor. Perform a STRICT reconciliation.
                 
-                DATA FROM EXCEL (Calculated Totals):
-                {excel_data_summary}
+                EXCEL CALCULATED TOTALS:
+                - Taxable Value: {ex_tax}
+                - CGST: {ex_cgst}
+                - SGST: {ex_sgst}
+                - IGST: {ex_igst}
+                - Cess: {ex_cess}
+                - Gross Total: {ex_total}
 
-                DATA FROM PDF:
-                Extract the 'Booked Revenue Summary' totals from the attached PDF page.
+                PDF DATA:
+                Find the 'Booked Revenue Summary' on the attached pages.
 
-                OUTPUT FORMAT:
-                | Component | GSTR-1 Excel (₹) | PDF Export (₹) | Status | Discrepancy (₹) |
-                | :--- | :--- | :--- | :--- | :--- |
-                | Taxable Value | | | | |
-                | CGST | | | | |
-                | SGST | | | | |
-                | IGST | | | | |
-                | Total Cess | | | | |
-                | Gross Total | | | | |
+                OUTPUT FORMAT (Provide only this table):
+                | Component | GSTR-1 Excel (₹) | PDF Export (₹) | Formula / Logic Used | Status | Discrepancy (₹) |
+                | :--- | :--- | :--- | :--- | :--- | :--- |
                 """
                 
                 response = model.generate_content([prompt, gemini_pdf])
                 
-                # 5. Display Result
-                st.subheader("📊 Reconciliation Audit Report")
+                st.subheader("📊 Audit Report")
                 st.markdown(response.text)
 
-                # Cleanup
+                # Debugging view
+                with st.expander("Debug: All Sheets and Columns Found"):
+                    for name, df in all_sheets.items():
+                        st.write(f"Sheet: {name} | Columns: {list(df.columns)}")
+
                 os.remove(tmp_pdf_path)
-                
             except Exception as e:
-                st.error(f"Audit Error: {e}")
+                st.error(f"Error: {e}")
