@@ -38,7 +38,7 @@ if pdf_file and excel_file:
                 excel_text = df.to_markdown() # Converting to text so Gemini can 'read' it
 
                 # --- Part C: Run Reconciliation ---
-                model = genai.GenerativeModel("gemini-1.5-pro")
+                model = genai.GenerativeModel("gemini-2.5-pro")
                 
                 prompt = f"""
                 You are a GST Auditor. 
