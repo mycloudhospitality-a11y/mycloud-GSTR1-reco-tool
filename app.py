@@ -1,10 +1,11 @@
 import streamlit as st
 import google.generativeai as genai
+import pandas as pd
 import tempfile
 import os
 
 st.set_page_config(page_title="GSTR-1 Reco Tool", layout="wide")
-st.title("🏨 MyCloud GSTR-1 Reconciliation Tool")
+st.title("🏨 Hotel GSTR-1 Reconciliation Tool")
 
 # API Setup
 if "GEMINI_API_KEY" in st.secrets:
@@ -15,38 +16,47 @@ else:
 
 st.sidebar.header("Step 1: Upload Files")
 pdf_file = st.sidebar.file_uploader("Upload ReportViewer PDF (Max 800MB)", type=["pdf"])
-csv_files = st.sidebar.file_uploader("Upload GSTR-1 CSVs", accept_multiple_files=True, type=["csv"])
+excel_file = st.sidebar.file_uploader("Upload GSTR-1 Excel (.xlsx)", type=["xlsx"])
 
-if pdf_file and csv_files:
+if pdf_file and excel_file:
+    st.sidebar.success("Both files uploaded!")
+    
     if st.button("🔍 Run Reconciliation"):
-        with st.spinner("Uploading and analyzing large files..."):
+        with st.spinner("Processing large PDF and converting Excel..."):
             try:
-                # 1. Save PDF to a temporary file locally
+                # --- Part A: Handle the 700MB PDF ---
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(pdf_file.getvalue())
                     tmp_path = tmp.name
 
-                # 2. Upload to Gemini Files API (Required for files > 20MB)
+                # Upload to Gemini staging area
                 gemini_pdf = genai.upload_file(path=tmp_path, display_name="ReportViewer")
-                
-                # 3. Process CSVs
-                gemini_csvs = []
-                for csv in csv_files:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as t_csv:
-                        t_csv.write(csv.getvalue())
-                        gemini_csvs.append(genai.upload_file(path=t_csv.name))
 
-                # 4. Run Analysis
+                # --- Part B: Handle the .xlsx Excel ---
+                # We read the Excel and convert it to a Markdown string for the AI
+                df = pd.read_excel(excel_file)
+                excel_text = df.to_markdown() # Converting to text so Gemini can 'read' it
+
+                # --- Part C: Run Reconciliation ---
                 model = genai.GenerativeModel("gemini-1.5-pro")
-                prompt = "Compare the 'Booked Revenue Summary' on the final page of the PDF with the CSV totals. Provide a reconciliation table."
                 
-                response = model.generate_content([prompt, gemini_pdf, *gemini_csvs])
+                prompt = f"""
+                You are a GST Auditor. 
+                1. Look at the 'Booked Revenue Summary' on the final page of the uploaded PDF.
+                2. Compare it with the following data from the GSTR-1 Excel file:
                 
-                st.subheader("📊 Results")
+                {excel_text}
+                
+                3. Provide a reconciliation table showing: Component, Books Value, GSTR-1 Value, and Difference.
+                """
+                
+                response = model.generate_content([prompt, gemini_pdf])
+                
+                st.subheader("📊 Reconciliation Result")
                 st.markdown(response.text)
 
-                # Cleanup
+                # Cleanup local temp file
                 os.remove(tmp_path)
                 
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error during processing: {e}")
