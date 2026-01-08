@@ -1,7 +1,9 @@
 import streamlit as st
 import google.generativeai as genai
 import pandas as pd
+from pypdf import PdfReader, PdfWriter
 import tempfile
+import io
 import os
 
 st.set_page_config(page_title="GSTR-1 Reco Tool", layout="wide")
@@ -20,37 +22,43 @@ excel_file = st.sidebar.file_uploader("Upload GSTR-1 Excel (.xlsx)", type=["xlsx
 
 if pdf_file and excel_file:
     if st.button("🚀 Run Full Audit"):
-        with st.spinner("Analyzing 1,100+ pages and calculating Excel totals..."):
+        with st.spinner("Slicing PDF to last page & analyzing..."):
             try:
-                # 1. Handle PDF
+                # --- NEW: Extract ONLY the last page to save tokens ---
+                pdf_reader = PdfReader(pdf_file)
+                last_page_index = len(pdf_reader.pages) - 1
+                
+                writer = PdfWriter()
+                writer.add_page(pdf_reader.pages[last_page_index])
+                
+                # Save just that 1 page to a temporary file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(pdf_file.getvalue())
+                    writer.write(tmp)
                     tmp_path = tmp.name
-                gemini_pdf = genai.upload_file(path=tmp_path, display_name="HotelReport")
 
-                # 2. Read ALL Sheets from Excel to find the data
+                # Upload the 1-page PDF to Gemini
+                gemini_pdf = genai.upload_file(path=tmp_path, display_name="LastPageSummary")
+
+                # --- Handle Excel ---
                 excel_data = pd.read_excel(excel_file, sheet_name=None)
                 combined_text = ""
                 for sheet_name, df in excel_data.items():
                     combined_text += f"\n--- Sheet: {sheet_name} ---\n{df.to_markdown()}"
 
-                # 3. Use Gemini 2.5 Flash
+                # --- Use Flash Model ---
                 model = genai.GenerativeModel("gemini-2.5-flash")
                 
-                # THE "GOLDEN PROMPT" for your specific table format
                 prompt = f"""
-                You are a Senior GST Auditor. Your goal is to create a formal Reconciliation Table.
+                You are a Senior GST Auditor. Use the provided page (the last page of the report) 
+                and the Excel data to create a Reconciliation Table.
                 
-                SOURCES:
-                1. PDF: Look at 'Booked Revenue Summary' on the very last page (Page 1160).
-                2. EXCEL DATA: Summarize the actual numerical values from these sheets:
+                EXCEL DATA:
                 {combined_text}
 
                 TASK:
-                Compare the PDF 'Total' row against the sum of the Excel data. 
-                Ignore template instructions; look for the actual numbers.
+                Compare the 'Booked Revenue Summary' on this PDF page against the Excel totals.
+                Provide the results in this EXACT table format:
 
-                REQUIRED OUTPUT TABLE FORMAT (Markdown):
                 | Component | GSTR-1 Excel Value (₹) | PDF Export Value (₹) | Formula / Logic Used | Status | Discrepancy (₹) |
                 | :--- | :--- | :--- | :--- | :--- | :--- |
                 | Total Taxable Value | | | Aggregated HSN/B2B | | |
@@ -60,8 +68,6 @@ if pdf_file and excel_file:
                 | IGST Amount | | | Total Integrated Tax | | |
                 | Total Cess | | | Total Additional Cess | | |
                 | Total Invoice Value | | | Gross Value | | |
-                | Exempted/Non-GST | | | Non-taxable supplies | | |
-                | Advances Adjusted | | | Previous Advance Tax | | |
                 """
                 
                 response = model.generate_content([prompt, gemini_pdf])
