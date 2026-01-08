@@ -3,7 +3,6 @@ import google.generativeai as genai
 import pandas as pd
 from pypdf import PdfReader, PdfWriter
 import tempfile
-import io
 import os
 
 st.set_page_config(page_title="GSTR-1 Reco Tool", layout="wide")
@@ -21,61 +20,56 @@ pdf_file = st.sidebar.file_uploader("Upload ReportViewer PDF", type=["pdf"])
 excel_file = st.sidebar.file_uploader("Upload GSTR-1 Excel (.xlsx)", type=["xlsx"])
 
 if pdf_file and excel_file:
-    if st.button("🚀 Run Full Audit"):
-        with st.spinner("Slicing PDF to last page & analyzing..."):
+    if st.button("🚀 Run Reconciliation"):
+        with st.spinner("Extracting summary page & analyzing..."):
             try:
-                # --- NEW: Extract ONLY the last page to save tokens ---
-                pdf_reader = PdfReader(pdf_file)
-                last_page_index = len(pdf_reader.pages) - 1
-                
+                # --- PDF SLICING: Extract ONLY the last page ---
+                reader = PdfReader(pdf_file)
+                total_pages = len(reader.pages)
                 writer = PdfWriter()
-                writer.add_page(pdf_reader.pages[last_page_index])
+                # We take the very last page (index -1)
+                writer.add_page(reader.pages[total_pages - 1])
                 
-                # Save just that 1 page to a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    writer.write(tmp)
-                    tmp_path = tmp.name
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                    writer.write(tmp_pdf)
+                    tmp_pdf_path = tmp_pdf.name
 
-                # Upload the 1-page PDF to Gemini
-                gemini_pdf = genai.upload_file(path=tmp_path, display_name="LastPageSummary")
+                # Upload only the 1-page PDF to Gemini
+                gemini_pdf = genai.upload_file(path=tmp_pdf_path, display_name="SummaryPage")
 
-                # --- Handle Excel ---
-                excel_data = pd.read_excel(excel_file, sheet_name=None)
-                combined_text = ""
-                for sheet_name, df in excel_data.items():
-                    combined_text += f"\n--- Sheet: {sheet_name} ---\n{df.to_markdown()}"
+                # --- EXCEL: Read all sheets ---
+                excel_sheets = pd.read_excel(excel_file, sheet_name=None)
+                excel_text = ""
+                for name, df in excel_sheets.items():
+                    excel_text += f"\n### Sheet: {name}\n{df.to_markdown()}\n"
 
-                # --- Use Flash Model ---
+                # --- AI PROCESSING: Using Gemini 2.5 Flash ---
                 model = genai.GenerativeModel("gemini-2.5-flash")
                 
                 prompt = f"""
-                You are a Senior GST Auditor. Use the provided page (the last page of the report) 
-                and the Excel data to create a Reconciliation Table.
+                AUDIT TASK: Compare the 'Booked Revenue Summary' on this PDF page with the Excel data.
                 
                 EXCEL DATA:
-                {combined_text}
+                {excel_text}
 
-                TASK:
-                Compare the 'Booked Revenue Summary' on this PDF page against the Excel totals.
-                Provide the results in this EXACT table format:
-
-                | Component | GSTR-1 Excel Value (₹) | PDF Export Value (₹) | Formula / Logic Used | Status | Discrepancy (₹) |
+                REQUIRED TABLE FORMAT:
+                | Component | GSTR-1 Excel (₹) | PDF Export (₹) | Formula / Logic | Status | Discrepancy (₹) |
                 | :--- | :--- | :--- | :--- | :--- | :--- |
-                | Total Taxable Value | | | Aggregated HSN/B2B | | |
-                | B2B Taxable Value | | | Total Registered Invoices | | |
+                | Total Taxable Value | | | Sum of Taxable | | |
                 | CGST Amount | | | Total Central Tax | | |
                 | SGST Amount | | | Total State Tax | | |
                 | IGST Amount | | | Total Integrated Tax | | |
-                | Total Cess | | | Total Additional Cess | | |
+                | Total Cess | | | Total Addl Cess | | |
                 | Total Invoice Value | | | Gross Value | | |
                 """
                 
                 response = model.generate_content([prompt, gemini_pdf])
                 
-                st.subheader("📊 Reconciliation Result")
+                st.subheader("📊 Audit Results")
                 st.markdown(response.text)
 
-                os.remove(tmp_path)
+                # Cleanup
+                os.remove(tmp_pdf_path)
                 
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Audit Error: {e}")
