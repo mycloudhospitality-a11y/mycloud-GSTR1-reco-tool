@@ -1,47 +1,52 @@
 import streamlit as st
 import google.generativeai as genai
-import pandas as pd
-import time
+import tempfile
+import os
 
-# 1. Page Config
 st.set_page_config(page_title="GSTR-1 Reco Tool", layout="wide")
 st.title("🏨 MyCloud GSTR-1 Reconciliation Tool")
 
-# 2. API Setup from Streamlit Secrets
+# API Setup
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
     st.error("Please add GEMINI_API_KEY to Streamlit Secrets!")
     st.stop()
 
-# 3. Sidebar - The Upload Zone
 st.sidebar.header("Step 1: Upload Files")
-pdf_file = st.sidebar.file_uploader("Upload ReportViewer PDF", type=["pdf"])
-csv_files = st.sidebar.file_uploader("Upload GSTR-1 CSVs (HSN, B2B, B2CS)", accept_multiple_files=True, type=["csv"])
+pdf_file = st.sidebar.file_uploader("Upload ReportViewer PDF (Max 800MB)", type=["pdf"])
+csv_files = st.sidebar.file_uploader("Upload GSTR-1 CSVs", accept_multiple_files=True, type=["csv"])
 
-# 4. Main Body
 if pdf_file and csv_files:
-    st.success("Files ready for processing!")
-    
     if st.button("🔍 Run Reconciliation"):
-        with st.spinner("Analyzing data... This may take a minute for large PDFs."):
+        with st.spinner("Uploading and analyzing large files..."):
             try:
-                # Instruction for the AI
-                system_prompt = """
-                Extract 'Booked Revenue Summary' from the final page of the PDF. 
-                Reconcile it with the uploaded CSV totals. 
-                Output a clean table with: Component, GSTR-1 Value, Books Value, Difference, and Status.
-                """
+                # 1. Save PDF to a temporary file locally
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(pdf_file.getvalue())
+                    tmp_path = tmp.name
+
+                # 2. Upload to Gemini Files API (Required for files > 20MB)
+                gemini_pdf = genai.upload_file(path=tmp_path, display_name="ReportViewer")
                 
+                # 3. Process CSVs
+                gemini_csvs = []
+                for csv in csv_files:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as t_csv:
+                        t_csv.write(csv.getvalue())
+                        gemini_csvs.append(genai.upload_file(path=t_csv.name))
+
+                # 4. Run Analysis
                 model = genai.GenerativeModel("gemini-1.5-pro")
+                prompt = "Compare the 'Booked Revenue Summary' on the final page of the PDF with the CSV totals. Provide a reconciliation table."
                 
-                # Note: Sending files directly to API
-                response = model.generate_content([system_prompt, pdf_file, *csv_files])
+                response = model.generate_content([prompt, gemini_pdf, *gemini_csvs])
                 
-                st.subheader("📊 Reconciliation Result")
+                st.subheader("📊 Results")
                 st.markdown(response.text)
+
+                # Cleanup
+                os.remove(tmp_path)
                 
             except Exception as e:
-                st.error(f"An error occurred: {e}")
-else:
-    st.info("Waiting for PDF and CSV uploads in the sidebar...")
+                st.error(f"Error: {e}")
